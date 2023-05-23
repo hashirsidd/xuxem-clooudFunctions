@@ -7,9 +7,8 @@ const { getFirestore } = require("firebase-admin/firestore");
 
 initializeApp();
 
-exports.sendNewMessageNotification = functions.firestore
+exports.newMessageNotification = functions.firestore
     .document("/messages/{documentId}").onCreate(async (event, context) => {
-        // Grab the current value of what was written to Firestore.
         const data = event.data();
         admin.firestore().collection('notifications').doc(data.clinicId).collection('allNotifications').add({
             "type": 'message',
@@ -23,19 +22,17 @@ exports.sendNewMessageNotification = functions.firestore
         var clinicId = data.clinicId;
         clinicId = clinicId.replace('@', '');
         const payload = {
-            data: {
-                title: `You have a message on ${data.offerId}`,
-                body: data.messageText,
-                badge: '1',
-                sound: 'default'
+            notification: {
+                title: `New message`,
+                body: `${data.messageText}`,
             },
             topic: clinicId,
         }
         try {
             const response = await admin.messaging().send(payload);
-            console.log("Successfully sent message", response);
+            functions.logger.log("Successfully sent messageNotification",response);
         } catch (error) {
-            console.log("Error sending message", error);
+            functions.logger.log("Error sending newMessageNotification", error);
         }
     });
 
@@ -56,11 +53,9 @@ exports.offerUpdateNotification = functions.firestore
         var clinicId = data.clinicID;
         clinicId = clinicId.replace('@', '');
         const payload = {
-            data: {
+            notification: {
                 title: `Offer updated`,
-                body: `Your offer with offer id : ${context.params.documentId} has been updated`,
-                badge: '1',
-                sound: 'default'
+                body: `Your offer has been updated!`,
             },
             topic: clinicId,
         }
@@ -89,11 +84,9 @@ exports.offerCreateNotification = functions.firestore
         var clinicId = data.clinicID;
         clinicId = clinicId.replace('@', '');
         const payload = {
-            data: {
+            notification: {
                 title: `Offer created`,
-                body: `Your new offer has been created and offer id is ${context.params.documentId}`,
-                badge: '1',
-                sound: 'default'
+                body: `Your new offer has been created!`,
             },
             topic: clinicId,
         }
@@ -119,11 +112,9 @@ exports.partnersUpdateNotification = functions.firestore
         clinicId = clinicId.replace('@', '');
 
         const payload = {
-            data: {
+            notification: {
                 title: `Partners updated`,
                 body: `Partners profile has been updated!`,
-                badge: '1',
-                sound: 'default'
             },
             topic: clinicId,
         }
