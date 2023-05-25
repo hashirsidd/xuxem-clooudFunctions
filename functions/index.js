@@ -296,11 +296,117 @@ exports.createSubscription = functions.https.onRequest(async (req, res) => {
             await admin.firestore().collection('stripeCustomer').doc(customer)
                 .set({ 'subscription': subscription }, { merge: true });
             functions.logger.log("Successfully added subscription");
+
+
+            var planId = subscription.plan.product;
+            const planSnapshot = await admin.firestore().collection('plans').doc(planId).get();
+            const planData = planSnapshot.data();
+            const planName = planData.plan.name;
+
+            functions.logger.log("Plan name", planName);
+
+            const stripeCustomerSnapshot = await admin.firestore().collection('stripeCustomer').doc(customer).get();
+            const stripeCustomer = stripeCustomerSnapshot.data();
+            var customerEmail = stripeCustomer.customer.email;
+
+            functions.logger.log("Customer email", customerEmail);
+
+            await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+                "type": 'subscriptionCreated',
+                'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+                "data": {
+                    'notification': `${planName} has been subscribed successfully!`
+                }
+            });
+
+            functions.logger.log("notification added");
+
+
+            customerEmail = customerEmail.replace('@', '');
+
+            const payload = {
+                notification: {
+                    title: `Subscription notification`,
+                    body: `${planName} has been subscribed successfully!`,
+                },
+                topic: customerEmail,
+            }
+            try {
+                const response = await admin.messaging().send(payload);
+                console.log("Successfully sent Subscription notification", response);
+            } catch (error) {
+                console.log("Error sending Subscription notification", error);
+            }
         } catch (error) {
             functions.logger.log("Error adding subscription", error);
         }
 
         res.json({ subscription });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
+    try {
+        try {
+            var data = req.body;
+            var customerEmail = data.data.object.customer_email;
+            var amount_due = data.data.object.amount_due
+            const status = data.data.object.status;
+            const hostedInvoiceUrl = data.data.object.hosted_invoice_url;
+            const currency = data.data.object.currency;
+            notification = '';
+            
+            if (data.type == "invoice.payment_succeeded" && status == 'paid') {
+
+                notification = `${String(currency).toUpperCase()} ${amount_due / 100} has been charged successfully!`;
+                
+                await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+                    "type": 'paymentSuccessful',
+                    'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+                    "data": {
+                        'notification': notification,
+                        'invoiceUrl': hostedInvoiceUrl
+                    }
+                });
+
+            } else {
+                
+                notification = `Failed to charge ${String(currency).toUpperCase()} ${amount_due / 100} for Xuxem.`;
+
+                await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+                    "type": 'paymentFailed',
+                    'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+                    "data": {
+                        'notification': notification
+                    }
+                });
+            
+            }
+
+            functions.logger.log("notification added successfully");
+
+            customerEmail = customerEmail.replace('@', '');
+
+            const payload = {
+                notification: {
+                    title: `Payment notification`,
+                    body: notification,
+                },
+                topic: customerEmail,
+            }
+            try {
+                const response = await admin.messaging().send(payload);
+                console.log("Successfully sent Payment notification", response);
+            } catch (error) {
+                console.log("Error sending Payment notification", error);
+            }
+
+            functions.logger.log("Successfull stripeWebhook");
+        } catch (error) {
+            functions.logger.log("Error stripeWebhook", error);
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
