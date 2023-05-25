@@ -5,6 +5,12 @@ const functions = require('firebase-functions');
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 
+const express = require('express');
+const app = express();
+const port = 3000;
+
+app.use(express.json());
+
 initializeApp();
 
 exports.newMessageNotification = functions.firestore
@@ -30,7 +36,7 @@ exports.newMessageNotification = functions.firestore
         }
         try {
             const response = await admin.messaging().send(payload);
-            functions.logger.log("Successfully sent messageNotification",response);
+            functions.logger.log("Successfully sent messageNotification", response);
         } catch (error) {
             functions.logger.log("Error sending newMessageNotification", error);
         }
@@ -125,3 +131,182 @@ exports.partnersUpdateNotification = functions.firestore
             console.log("Error sending partnersUpdateNotification", error);
         }
     });
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////                    /////////////////////////////////////////////   
+///////////////////////////////////////////////  STRIPE FUNCTIONS  /////////////////////////////////////////////
+//////////////////////////////////////////////                    /////////////////////////////////////////////   
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////                       //////////////////////////////////////// 
+////////////////////////////////////////////        TODO           ////////////////////////////////////////   
+///////////////////////////////////////////      UPDATE KEY       ////////////////////////////////////////
+//////////////////////////////////////////  SWTICH TO LIVE MODE  ////////////////////////////////////////
+/////////////////////////////////////////                       ////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+const stripe = require('stripe')('sk_test_51NAUUYIwXLBQ5coy2wenOb1SzXnyHxpwBQNbxpfqQLN93S3pDOVFamiDlowelNUJQp0mVYsabBArds2Gy6RbOHFZ00jzzg39ZX');
+
+exports.createCustomer = functions.https.onRequest(async (req, res) => {
+    try {
+        const { description, name, address, email } = req.body;
+
+        const customer = await stripe.customers.create({
+            description: description,
+            name: name,
+            email: email,
+            address: {
+                line1: address,
+            },
+            // livemode:true
+        });
+        // add customer data to firebase
+        try {
+
+            await admin.firestore().collection('stripeCustomer').doc(customer.id)
+                .set({ 'customer': customer, 'clinicId': email }, { merge: true });
+            await admin.firestore().collection('partners').doc(email)
+                .set({ 'stripeCustomerId': customer.id }, { merge: true });
+            functions.logger.log("Successfully added customer");
+        } catch (error) {
+            functions.logger.log("Error adding customer", error);
+        }
+        res.json({ customer });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+exports.createStripeToken = functions.https.onRequest(async (req, res) => {
+    try {
+        const { cardNumber, expMonth, expYear, cvc, email } = req.body;
+
+        const token = await stripe.tokens.create({
+            card: {
+                number: cardNumber,
+                exp_month: expMonth,
+                exp_year: expYear,
+                cvc: cvc,
+            },
+        });
+
+        try {
+            await admin.firestore().collection('partners').doc(email)
+                .set({ 'stripeCardToken': token.id }, { merge: true });
+            functions.logger.log("Successfully added token");
+        } catch (error) {
+            functions.logger.log("Error adding token", error);
+        }
+
+        res.json({ stripeToken: token.id });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+exports.createCard = functions.https.onRequest(async (req, res) => {
+    try {
+        const customerId = req.body.customerId;
+        const stripeToken = req.body.stripeToken;
+
+        const source = await stripe.customers.createSource(customerId, {
+            source: stripeToken
+        });
+
+        try {
+            await admin.firestore().collection('stripeCustomer').doc(customerId)
+                .set({ 'card': source }, { merge: true });
+            functions.logger.log("Successfully added card");
+        } catch (error) {
+            functions.logger.log("Error adding card", error);
+        }
+
+        res.json({ source });
+    } catch (error) {
+        res.status(500).json({ "Error": error.message });
+    }
+});
+
+
+exports.createPlan = functions.https.onRequest(async (req, res) => {
+    try {
+        const { id, planName } = req.body;
+        const product = await stripe.products.create({
+            id: id,
+            name: planName,
+            active: true,
+            // livemode:true
+        });
+
+        try {
+            await admin.firestore().collection('plans').doc(String(id))
+                .set({ 'plan': product });
+            functions.logger.log("Successfully added plan");
+        } catch (error) {
+            functions.logger.log("Error adding plan", error);
+        }
+
+        res.json({ product });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+exports.createPrice = functions.https.onRequest(async (req, res) => {
+    try {
+        const { unit_amount, currency, interval, product } = req.body;
+
+        const price = await stripe.prices.create({
+            unit_amount: unit_amount,
+            currency: currency,
+            recurring: { interval },
+            product: product,
+            // livemode: true
+        });
+
+        try {
+            await admin.firestore().collection('plans').doc(String(product))
+                .set({ 'price': price }, { merge: true });
+            functions.logger.log("Successfully added price");
+        } catch (error) {
+            functions.logger.log("Error adding price", error);
+        }
+
+        res.json({ price });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+exports.createSubscription = functions.https.onRequest(async (req, res) => {
+    try {
+        const { customer, price } = req.body;
+
+        const subscription = await stripe.subscriptions.create({
+            customer: customer,
+            items: [
+                { price: price },
+            ],
+            // livemode: true
+        });
+
+        try {
+            await admin.firestore().collection('stripeCustomer').doc(customer)
+                .set({ 'subscription': subscription }, { merge: true });
+            functions.logger.log("Successfully added subscription");
+        } catch (error) {
+            functions.logger.log("Error adding subscription", error);
+        }
+
+        res.json({ subscription });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// // Start the server
+// app.listen(port, () => {
+//     console.log(`API server listening at http://localhost:${port}`);
+// });
