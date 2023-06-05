@@ -4,13 +4,13 @@ const functions = require('firebase-functions');
 // The Firebase Admin SDK to access Firestore.
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
+const axios = require('axios');
 
 const express = require('express');
 const app = express();
 const port = 3000;
 
 app.use(express.json());
-
 initializeApp();
 
 exports.newMessageNotification = functions.firestore
@@ -149,10 +149,9 @@ const stripe = require('stripe')('sk_test_51NAUUYIwXLBQ5coy2wenOb1SzXnyHxpwBQNbx
 
 exports.createCustomer = functions.https.onRequest(async (req, res) => {
     try {
-        const { description, name, address, email } = req.body;
+        const { name, email, address } = req.body;
 
         const customer = await stripe.customers.create({
-            description: description,
             name: name,
             email: email,
             address: {
@@ -179,7 +178,7 @@ exports.createCustomer = functions.https.onRequest(async (req, res) => {
 
 exports.createStripeToken = functions.https.onRequest(async (req, res) => {
     try {
-        const { cardNumber, expMonth, expYear, cvc, email } = req.body;
+        const { cardNumber, expMonth, expYear, cvc, stripeCustomerId } = req.body;
 
         const token = await stripe.tokens.create({
             card: {
@@ -191,7 +190,7 @@ exports.createStripeToken = functions.https.onRequest(async (req, res) => {
         });
 
         try {
-            await admin.firestore().collection('partners').doc(email)
+            await admin.firestore().collection('stripeCustomer').doc(stripeCustomerId)
                 .set({ 'stripeCardToken': token.id }, { merge: true });
             functions.logger.log("Successfully added token");
         } catch (error) {
@@ -255,18 +254,18 @@ exports.createPlan = functions.https.onRequest(async (req, res) => {
 
 exports.createPrice = functions.https.onRequest(async (req, res) => {
     try {
-        const { unit_amount, currency, interval, product } = req.body;
+        const { unit_amount, currency, interval, planId } = req.body;
 
         const price = await stripe.prices.create({
             unit_amount: unit_amount,
             currency: currency,
             recurring: { interval },
-            product: product,
+            product: planId,
             // livemode: true
         });
 
         try {
-            await admin.firestore().collection('plans').doc(String(product))
+            await admin.firestore().collection('plans').doc(String(planId))
                 .set({ 'price': price }, { merge: true });
             functions.logger.log("Successfully added price");
         } catch (error) {
@@ -282,12 +281,20 @@ exports.createPrice = functions.https.onRequest(async (req, res) => {
 
 exports.createSubscription = functions.https.onRequest(async (req, res) => {
     try {
-        const { customer, price } = req.body;
+        const { customer, planId } = req.body;
+
+
+        const planSnapshot = await admin.firestore().collection('plans').doc(planId).get();
+        const planData = planSnapshot.data();
+        const priceId = planData.price.id;
+        const planName = planData.plan.name;
+
+        functions.logger.log("Plan name", planName);
 
         const subscription = await stripe.subscriptions.create({
             customer: customer,
             items: [
-                { price: price },
+                { price: priceId },
             ],
             // livemode: true
         });
@@ -298,18 +305,13 @@ exports.createSubscription = functions.https.onRequest(async (req, res) => {
             functions.logger.log("Successfully added subscription");
 
 
-            var planId = subscription.plan.product;
-            const planSnapshot = await admin.firestore().collection('plans').doc(planId).get();
-            const planData = planSnapshot.data();
-            const planName = planData.plan.name;
-
-            functions.logger.log("Plan name", planName);
-
             const stripeCustomerSnapshot = await admin.firestore().collection('stripeCustomer').doc(customer).get();
             const stripeCustomer = stripeCustomerSnapshot.data();
             var customerEmail = stripeCustomer.customer.email;
 
-            functions.logger.log("Customer email", customerEmail);
+            await admin.firestore().collection('partners').doc(customerEmail)
+                .set({ 'subscription': planName, 'paymentStatus': 'UNPAID', 'isPayPalCustomer': false, }, { merge: true });
+            functions.logger.log("Successfully added subscription to partners");
 
             await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
                 "type": 'subscriptionCreated',
@@ -340,12 +342,77 @@ exports.createSubscription = functions.https.onRequest(async (req, res) => {
         } catch (error) {
             functions.logger.log("Error adding subscription", error);
         }
-
         res.json({ subscription });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
+
+exports.cancelStripeUserSubscription = functions.https.onRequest(async (req, res) => {
+    try {
+        const { stripeCustomerId } = req.body;
+
+        const subscriptionSnapshot = await admin.firestore().collection('stripeCustomer').doc(stripeCustomerId).get();
+        const subscriptionData = subscriptionSnapshot.data();
+        var customerEmail = subscriptionData.clinicId;
+        var subscriptionId = subscriptionData.subscription.id;
+
+        await cancelStripeSubscription(subscriptionId, stripeCustomerId, customerEmail);
+
+        await admin.firestore().collection('partners').doc(customerEmail)
+            .set({ 'paymentStatus': 'UNPAID', 'isPayPalCustomer': false, }, { merge: true });
+        functions.logger.log("Successfully updated payment to partners");
+
+        await updateOfferStatus(customerEmail, 'UNPAID');
+        functions.logger.log("Successfully updated offerstatus to unpaid");
+
+        res.status(200).end();
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+async function cancelStripeSubscription(subscriptionId, stripeCustomerId, customerEmail) {
+    try {
+        const deleted = await stripe.subscriptions.cancel(subscriptionId);
+
+        await admin.firestore().collection('stripeCustomer').doc(stripeCustomerId)
+            .set({ 'subscription': deleted }, { merge: true });
+        functions.logger.log("Successfully cancelled subscription");
+
+        await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+            "type": 'subscriptionCancelled',
+            'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+            "data": {
+                'notification': `Your subscription has been cancelled!`
+            }
+        });
+
+        functions.logger.log("notification added");
+
+
+        customerEmail = customerEmail.replace('@', '');
+
+        const payload = {
+            notification: {
+                title: `Subscription notification`,
+                body: `Your subscription has been cancelled!`,
+            },
+            topic: customerEmail,
+        }
+        try {
+            const response = await admin.messaging().send(payload);
+            functions.logger.log("Successfully sent Subscription notification", response);
+        } catch (error) {
+            functions.logger.log("Error sending Subscription notification", error);
+        }
+
+        return deleted;
+    } catch (error) {
+        functions.logger.log('Error cancelStripeSubscription :', error);
+        throw new functions.https.HttpsError('internal', 'Failed to cancel stripe subscription.');
+    }
+}
 
 exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
     try {
@@ -356,12 +423,11 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
             const status = data.data.object.status;
             const hostedInvoiceUrl = data.data.object.hosted_invoice_url;
             const currency = data.data.object.currency;
-            notification = '';
-            
+            var notification = '';
+            var paymentStatus = '';
             if (data.type == "invoice.payment_succeeded" && status == 'paid') {
-
+                paymentStatus = 'PAID';
                 notification = `${String(currency).toUpperCase()} ${amount_due / 100} has been charged successfully!`;
-                
                 await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
                     "type": 'paymentSuccessful',
                     'timestamp': admin.firestore.FieldValue.serverTimestamp(),
@@ -370,9 +436,12 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
                         'invoiceUrl': hostedInvoiceUrl
                     }
                 });
+                await admin.firestore().collection('invoices').doc(customerEmail).collection('allInvoices').add({
+                    data
+                });
 
             } else {
-                
+                paymentStatus = 'UNPAID';
                 notification = `Failed to charge ${String(currency).toUpperCase()} ${amount_due / 100} for Xuxem.`;
 
                 await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
@@ -382,10 +451,34 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
                         'notification': notification
                     }
                 });
-            
-            }
 
+
+                const partnersSnapshot = await admin.firestore().collection('partners').doc(customerEmail).get();
+                const stripeCustomerId = partnersSnapshot.data().stripeCustomerId;
+
+                const stripeCustomerSnapshot = await admin.firestore().collection('stripeCustomer').doc(stripeCustomerId).get();
+                const subscriptionId = stripeCustomerSnapshot.data().subscription.id;
+
+                await cancelStripeSubscription(subscriptionId, stripeCustomerId, customerEmail);
+
+            }
             functions.logger.log("notification added successfully");
+
+            await admin.firestore().collection('partners').doc(customerEmail)
+                .set({ 'paymentStatus': paymentStatus }, { merge: true });
+            functions.logger.log("Successfully updated payment status in partners");
+
+            const collectionRef = admin.firestore().collection('offers');
+            const querySnapshot = await collectionRef.where('clinicID', '==', customerEmail).get();
+
+            const batch = admin.firestore().batch();
+            querySnapshot.forEach((doc) => {
+                const docRef = collectionRef.doc(doc.id);
+                batch.set(docRef, { 'paymentStatus': paymentStatus }, { merge: true });
+            });
+
+            await batch.commit();
+            functions.logger.log("offers updated successfully");
 
             customerEmail = customerEmail.replace('@', '');
 
@@ -412,7 +505,497 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
     }
 });
 
-// // Start the server
-// app.listen(port, () => {
-//     console.log(`API server listening at http://localhost:${port}`);
-// });
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////                    /////////////////////////////////////////////   
+///////////////////////////////////////////////  PAYPAL FUNCTIONS  /////////////////////////////////////////////
+//////////////////////////////////////////////                    /////////////////////////////////////////////   
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+// Cloud Function to create a PayPal subscription
+exports.createPayPalSubscription = functions.https.onRequest(async (req, res) => {
+    try {
+        var paypalPlanId = '';
+        if (req.body.planId == 'basic') {
+            paypalPlanId = 'P-9UJ10753XJ220052RMR3P7WI';
+        } else if (req.body.planId == 'silver') {
+            paypalPlanId = 'P-11P16354YF360924MMR3P7MA';
+        } else {
+            paypalPlanId = 'P-8HM69091A9729273HMR3P7AY';
+        }
+
+        const returnUrl = 'https://xuxem.page.link/VKHLNT867qz2UjCBA';
+        const cancelUrl = 'https://xuxem.page.link/dqFsAKZ9Cm5dL22y8';
+        const accessToken = await getAccessToken();
+        const subscription = await createSubscription(accessToken, paypalPlanId, returnUrl, cancelUrl, req.body.customerEmail);
+
+        res.json({ success: true, subscriptionUrl: subscription.links[0].href, subscription: subscription });
+    } catch (error) {
+        functions.logger.log('Error creating PayPal subscription:', error);
+        throw new functions.https.HttpsError('internal', 'Failed to create PayPal subscription.');
+    }
+});
+
+// Helper function to retrieve PayPal access token
+async function getAccessToken() {
+    try {
+        const clientId = 'AVPInFt4P71ZV60uDtgJnVrG3HaZ-XI3gbU1dvzLHQP7_OqvbY76tseuZv0cNOE3p5YCfP635-AY2j2a';
+        const clientSecret = 'EDcQ2di1vKJWsA0ySWabpz9iOfCvNWLJfZsw544vwYqKD35UsV00lH6SLCtDVRMDxUZEYLvQbZWbEBSE';
+        const authString = `${clientId}:${clientSecret}`;
+        const base64Auth = Buffer.from(authString).toString('base64');
+
+        const response = await axios.post('https://api.sandbox.paypal.com/v1/oauth2/token', 'grant_type=client_credentials', {
+            headers: {
+                'Authorization': `Basic ${base64Auth}`,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+        });
+
+        return response.data.access_token;
+    } catch (error) {
+        functions.logger.log('Error getting PayPal access token:', error);
+        throw new functions.https.HttpsError('internal', 'Failed to get PayPal access token.');
+    }
+}
+
+// Helper function to create a PayPal subscription
+async function createSubscription(accessToken, planId, returnUrl, cancelUrl, customerEmail) {
+    try {
+        const response = await axios.post('https://api.sandbox.paypal.com/v1/billing/subscriptions', {
+            plan_id: planId,
+            subscriber: {
+                email_address: customerEmail,
+            },
+            application_context: {
+                brand_name: "XUXEM",
+                locale: "en-US",
+                user_action: "SUBSCRIBE_NOW",
+                payment_method: {
+                    payer_selected: "PAYPAL",
+                    payee_preferred: "IMMEDIATE_PAYMENT_REQUIRED"
+                },
+                return_url: returnUrl,
+                cancel_url: cancelUrl
+            }
+        }, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+            },
+        });
+
+        var planName = getPlanName(planId);
+        var subscriptionId = response.data.id;
+        //add data to partners table
+        await admin.firestore().collection('partners').doc(customerEmail)
+            .set({ 'subscription': planName, 'paymentStatus': 'UNPAID', 'isPayPalCustomer': true, 'payPalSubscriptionId': subscriptionId }, { merge: true });
+        functions.logger.log("Successfully added subscription to partners");
+
+        await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId)
+            .set({
+                'subscription': planName,
+                'clinicId': customerEmail,
+                'subscriptionStatus': response.data.status,
+                'time': response.data.create_time,
+                'payPalPlanId': planId,
+                'subscriptionId': subscriptionId,
+            }, { merge: true });
+
+        functions.logger.log("Successfully added data to PayPalSubscription");
+
+        return response.data;
+    } catch (error) {
+        functions.logger.log('Error creating PayPal subscription:', error);
+        throw new functions.https.HttpsError('internal', 'Failed to create PayPal subscription.');
+    }
+}
+
+function getPlanName(payPalPlanId) {
+    if (payPalPlanId == 'P-9UJ10753XJ220052RMR3P7WI') {
+        return 'Basic plan';
+    } else if (payPalPlanId == 'P-11P16354YF360924MMR3P7MA') {
+        return 'Silver plan';
+    } else {
+        return 'Gold plan';
+    }
+}
+
+function getPlanId(payPalPlanId) {
+    if (payPalPlanId == 'P-9UJ10753XJ220052RMR3P7WI') {
+        return 'basic';
+    } else if (payPalPlanId == 'P-11P16354YF360924MMR3P7MA') {
+        return 'silver';
+    } else {
+        return 'gold';
+    }
+}
+// Cloud Function to create a PayPal subscription
+exports.cancelPayPalSubscription = functions.https.onRequest(async (req, res) => {
+    try {
+        const subscriptionId = req.body.subscriptionId;
+        const reason = req.body.reason;
+
+        const result = await cancelPayPalUserSubscription(subscriptionId, reason);
+
+        if (result == 204) {
+            res.status(200).end();
+        } else {
+            functions.logger.log('Failed to create cancel subscription :');
+            res.status(result).json({ error: 'Failed to cancel subscription' });
+        }
+    } catch (error) {
+        functions.logger.log('Error cancel PayPal subscription from cancelPayPalSubscription:', error);
+        throw new functions.https.HttpsError('internal', 'Failed to cancel PayPal subscription.');
+    }
+});
+
+async function cancelPayPalUserSubscription(subscriptionId, reason) {
+    try {
+        const accessToken = await getAccessToken();
+
+        const response = await axios.post(`https://api.sandbox.paypal.com/v1/billing/subscriptions/${subscriptionId}/cancel`, {
+            "reason": reason
+        }, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+            },
+        });
+
+        return response.status;
+    } catch (error) {
+        functions.logger.log('Error canceling PayPal subscription from cancelPayPalUserSubscription:', error);
+        if (error.response) {
+            return error.response.status;
+        } else {
+            throw new functions.https.HttpsError('internal', 'Failed to cancel PayPal subscription.');
+        }
+    }
+}
+
+exports.payPalWebhookHandler = functions.https.onRequest(async (req, res) => {
+    try {
+        // await admin.firestore().collection('paypalWebhooks').add({
+        //     'data': req.body
+        // });
+        functions.logger.log("Successfull Webhook");
+
+        if (req.body.event_type == 'BILLING.SUBSCRIPTION.CREATED') {
+            // await subscriptionCreated(req.body);
+        } else if (req.body.event_type == 'BILLING.SUBSCRIPTION.ACTIVATED') {
+            await subscriptionActivated(req.body);
+        } else if (req.body.event_type == 'BILLING.SUBSCRIPTION.CANCELLED') {
+            await subscriptionCancelled(req.body);
+        } else if (req.body.event_type == 'BILLING.SUBSCRIPTION.SUSPENDED') {
+            await subscriptionSuspended(req.body);
+        } else if (req.body.event_type == 'BILLING.SUBSCRIPTION.PAYMENT.FAILED') {
+            await subscriptionPaymentFailed(req.body);
+        }
+
+        res.status(200).end();
+    } catch (error) {
+        functions.logger.log("Error stripeWebhook", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+async function subscriptionPaymentFailed(data) {
+    try {
+        const time = data.create_time;
+        const subscriptionId = data.resource.id;
+        const subscriptionStatus = 'PAYMENT_FAILED';
+
+        var subscriptionData = await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId).get();
+        var customerEmail = subscriptionData.data().clinicId;
+        var payPalPlanId = subscriptionData.data().payPalPlanId;
+
+        var planName = getPlanName(payPalPlanId);
+
+
+        await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+            "type": 'subscriptionSuspended',
+            'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+            "data": {
+                'notification': `${planName} payment failed!`,
+            }
+        });
+
+        functions.logger.log("Successfully added notification");
+
+        customerEmail = customerEmail.replace('@', '');
+
+        const payload = {
+            notification: {
+                title: `Subscription notification`,
+                body: `${planName} payment failed!`,
+            },
+            topic: customerEmail,
+        }
+        try {
+            const response = await admin.messaging().send(payload);
+            functions.logger.log("Successfully sent subscriptionPaymentFailed notification", response);
+        } catch (error) {
+            functions.logger.log("Error sending subscriptionPaymentFailed notification", error);
+        }
+
+        const result = await cancelPayPalUserSubscription(subscriptionId, 'Subscription cancelled due to payment failed!');
+
+        if (result == 204) {
+            res.status(200).end();
+        } else {
+            functions.logger.log('Failed to create cancel subscription :');
+            res.status(result).json({ error: 'Failed to cancel subscription' });
+        }
+    } catch (error) {
+        functions.logger.log('Failed to add subscriptionPaymentFailed details : ', error);
+        throw new functions.https.HttpsError('internal', 'Failed to add subscriptionPaymentFailed details.');
+    }
+}
+
+async function subscriptionSuspended(data) {
+    try {
+        const time = data.create_time;
+        const subscriptionId = data.resource.id;
+        const subscriptionStatus = data.resource.state;
+
+
+        var subscriptionData = await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId).get();
+        var customerEmail = subscriptionData.data().clinicId;
+        var payPalPlanId = subscriptionData.data().payPalPlanId;
+
+        var planName = getPlanName(payPalPlanId);
+
+        //add data to partners table
+        await admin.firestore().collection('partners').doc(customerEmail)
+            .set({ 'paymentStatus': 'UNPAID' }, { merge: true });
+        functions.logger.log("Successfully added subscription to partners");
+
+        //update offer status
+        await updateOfferStatus(customerEmail, 'UNPAID');
+
+        // add data to payPalSubscriptions
+        await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId)
+            .set({
+                'subscriptionStatus': subscriptionStatus,
+                'time': time,
+            }, { merge: true });
+        functions.logger.log("Successfully added subscription to payPalSubscriptions");
+
+        await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+            "type": 'subscriptionSuspended',
+            'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+            "data": {
+                'notification': `${planName} subscription has been suspended!`,
+            }
+        });
+
+        functions.logger.log("Successfully added notification");
+
+        customerEmail = customerEmail.replace('@', '');
+
+        const payload = {
+            notification: {
+                title: `Subscription notification`,
+                body: `${planName} subscription has been suspended!`,
+            },
+            topic: customerEmail,
+        }
+        try {
+            const response = await admin.messaging().send(payload);
+            functions.logger.log("Successfully sent suspended notification", response);
+        } catch (error) {
+            functions.logger.log("Error sending suspended notification", error);
+        }
+
+    } catch (error) {
+        functions.logger.log('Failed to add subscriptionSuspended details : ', error);
+        throw new functions.https.HttpsError('internal', 'Failed to add subscriptionSuspended details.');
+    }
+}
+
+async function subscriptionCancelled(data) {
+    try {
+        const time = data.create_time;
+        const subscriptionId = data.resource.id;
+        const payPalPlanId = data.resource.plan_id;
+        const subscriptionStatus = data.resource.status;
+        const note = data.resource.status_change_note;
+
+        var planName = getPlanName(payPalPlanId);
+
+        var subscriptionData = await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId).get();
+        var customerEmail = subscriptionData.data().clinicId;
+
+        //add data to partners table
+        await admin.firestore().collection('partners').doc(customerEmail)
+            .set({ 'paymentStatus': 'UNPAID' }, { merge: true });
+        functions.logger.log("Successfully added subscription to partners");
+
+        //update offer status
+        await updateOfferStatus(customerEmail, 'UNPAID');
+
+        // add data to payPalSubscriptions
+        await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId)
+            .set({
+                'subscriptionStatus': subscriptionStatus,
+                'time': time,
+                'note': note,
+            }, { merge: true });
+        functions.logger.log("Successfully added subscription to payPalSubscriptions");
+
+        await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+            "type": 'subscriptionCancelled',
+            'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+            "data": {
+                'notification': `${planName} subscription has been cancelled!`,
+            }
+        });
+
+        functions.logger.log("Successfully added notification");
+
+        customerEmail = customerEmail.replace('@', '');
+
+        const payload = {
+            notification: {
+                title: `Subscription notification`,
+                body: `${planName} subscription has been cancelled!`,
+            },
+            topic: customerEmail,
+        }
+        try {
+            const response = await admin.messaging().send(payload);
+            functions.logger.log("Successfully sent payment notification", response);
+        } catch (error) {
+            functions.logger.log("Error sending payment notification", error);
+        }
+
+    } catch (error) {
+        functions.logger.log('Failed to add subscriptionCancelled details : ', error);
+        throw new functions.https.HttpsError('internal', 'Failed to add subscriptionCancelled details.');
+    }
+}
+
+async function subscriptionActivated(data) {
+    try {
+        const time = data.create_time;
+        const subscriptionId = data.resource.id;
+        const payPalPlanId = data.resource.plan_id;
+        const subscriptionStatus = data.resource.status;
+        const amount = data.resource.billing_info.last_payment.amount['value'];
+
+        var planName = getPlanName(payPalPlanId);
+
+        var subscriptionData = await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId).get();
+        var customerEmail = subscriptionData.data().clinicId;
+
+        //add data to partners table
+        await admin.firestore().collection('partners').doc(customerEmail)
+            .set({ 'paymentStatus': 'PAID' }, { merge: true });
+        functions.logger.log("Successfully added subscription to partners");
+
+        //update offer status
+        await updateOfferStatus(customerEmail, 'PAID');
+
+        // add data to payPalSubscriptions
+        await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId)
+            .set({
+                'subscription': planName,
+                'clinicId': customerEmail,
+                'subscriptionStatus': subscriptionStatus,
+                'time': time,
+                'payPalPlanId': payPalPlanId,
+                'subscriptionId': subscriptionId,
+                'cancelUrl': `https://api.sandbox.paypal.com/v1/billing/subscriptions/${subscriptionId}/cancel`
+            }, { merge: true });
+        functions.logger.log("Successfully added subscription to payPalSubscriptions");
+
+        await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+            "type": 'subscriptionActivated',
+            'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+            "data": {
+                'notification': `EUR ${amount} has been charged successfully!`
+            }
+        });
+
+        functions.logger.log("Successfully added notification");
+
+        customerEmail = customerEmail.replace('@', '');
+
+        const payload = {
+            notification: {
+                title: `Subscription notification`,
+                body: `EUR ${amount} has been charged successfully!`,
+            },
+            topic: customerEmail,
+        }
+        try {
+            const response = await admin.messaging().send(payload);
+            functions.logger.log("Successfully sent payment notification", response);
+        } catch (error) {
+            functions.logger.log("Error sending payment notification", error);
+        }
+
+    } catch (error) {
+        functions.logger.log('Failed to add subscriptionActivated details : ', error);
+        throw new functions.https.HttpsError('internal', 'Failed to add subscriptionActivated details.');
+    }
+
+
+}
+
+async function subscriptionCreated(data) {
+    const payPalPlanId = data.resource.plan_id;
+    var customerEmail = data.resource.subscriber.email_address;
+    try {
+        var planName = getPlanName(payPalPlanId);
+
+        await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+            "type": 'subscriptionCreated',
+            'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+            "data": {
+                'notification': `${planName} has been subscribed successfully!`
+            }
+        });
+        functions.logger.log("Successfully added notification");
+
+    } catch (error) {
+        functions.logger.log('Failed to add subscriptionCreated details : ', error);
+        throw new functions.https.HttpsError('internal', 'Failed to add subscriptionCreated details.');
+    }
+
+    customerEmail = customerEmail.replace('@', '');
+
+    const payload = {
+        notification: {
+            title: `Subscription notification`,
+            body: `${planName} has been subscribed successfully!`,
+        },
+        topic: customerEmail,
+    }
+    try {
+        const response = await admin.messaging().send(payload);
+        functions.logger.log("Successfully sent Subscription notification", response);
+    } catch (error) {
+        functions.logger.log("Error sending Subscription notification", error);
+    }
+}
+
+async function updateOfferStatus(customerEmail, paymentStatus) {
+    try {
+        const collectionRef = admin.firestore().collection('offers');
+        const querySnapshot = await collectionRef.where('clinicID', '==', customerEmail).get();
+
+        const batch = admin.firestore().batch();
+        querySnapshot.forEach((doc) => {
+            const docRef = collectionRef.doc(doc.id);
+            batch.set(docRef, { 'paymentStatus': paymentStatus }, { merge: true });
+        });
+
+        await batch.commit();
+        functions.logger.log("offers updated successfully");
+    } catch (error) {
+        functions.logger.log("offers update error: ", error);
+        throw new functions.https.HttpsError('internal', 'Failed to update offer Status');
+    }
+}
