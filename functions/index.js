@@ -54,6 +54,7 @@ exports.offerUpdateNotification = functions.firestore
                 'offerTitle': data.offerTitle,
                 'status': data.status,
                 'offerId': context.params.documentId,
+                'notification': 'You offer has been updated!'
             }
         });
         var clinicId = data.clinicID;
@@ -85,6 +86,7 @@ exports.offerCreateNotification = functions.firestore
                 'offerTitle': data.offerTitle,
                 'status': data.status,
                 'offerId': context.params.documentId,
+                'notification': 'You offer has been created!'
             }
         });
         var clinicId = data.clinicID;
@@ -111,7 +113,7 @@ exports.partnersUpdateNotification = functions.firestore
             "type": 'partnersUpdate',
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
-                'notification': 'partners data updated!'
+                'notification': 'Partners profile has been updated!'
             }
         });
         var clinicId = context.params.documentId;
@@ -199,7 +201,8 @@ exports.createStripeToken = functions.https.onRequest(async (req, res) => {
 
         res.json({ stripeToken: token.id });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        functions.logger.log("Error creating token", error);
+        res.status(500).json({ 'error': error });
     }
 });
 
@@ -223,7 +226,8 @@ exports.createCard = functions.https.onRequest(async (req, res) => {
 
         res.json({ source });
     } catch (error) {
-        res.status(500).json({ "Error": error.message });
+        functions.logger.log("Error adding card", error);
+        res.status(500).json({ "Error": error.toString()});
     }
 });
 
@@ -335,15 +339,16 @@ exports.createSubscription = functions.https.onRequest(async (req, res) => {
             }
             try {
                 const response = await admin.messaging().send(payload);
-                console.log("Successfully sent Subscription notification", response);
+                functions.logger.log("Successfully sent Subscription notification", response);
             } catch (error) {
-                console.log("Error sending Subscription notification", error);
+                functions.logger.log("Error sending Subscription notification", error);
             }
         } catch (error) {
             functions.logger.log("Error adding subscription", error);
         }
         res.json({ subscription });
     } catch (error) {
+        functions.logger.log("Error in create subscription", error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -414,6 +419,15 @@ async function cancelStripeSubscription(subscriptionId, stripeCustomerId, custom
     }
 }
 
+
+async function retriveSubsCription(id) {
+    const subscription = await stripe.subscriptions.retrieve(id);
+    return {
+        'start': subscription.current_period_start,
+        'end': subscription.current_period_end
+    };
+}
+
 exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
     try {
         try {
@@ -436,8 +450,16 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
                         'invoiceUrl': hostedInvoiceUrl
                     }
                 });
+
+                var subscriptionData = await retriveSubsCription(data.data.object.subscription)
+
                 await admin.firestore().collection('invoices').doc(customerEmail).collection('allInvoices').add({
-                    data
+                    'status': 'PAID',
+                    'amount': `${data.data.object.amount_paid / 100}`,
+                    'start': subscriptionData.start,
+                    'end': subscriptionData.end,
+                    'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+                    'mode': 'Stripe'
                 });
 
             } else {
@@ -452,7 +474,14 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
                     }
                 });
 
-
+                await admin.firestore().collection('invoices').doc(customerEmail).collection('allInvoices').add({
+                    'status': 'UNPAID',
+                    'amount': `${amount_due / 100}`,
+                    'start': '',
+                    'end': '',
+                    'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+                    'mode': 'Stripe'
+                });
                 const partnersSnapshot = await admin.firestore().collection('partners').doc(customerEmail).get();
                 const stripeCustomerId = partnersSnapshot.data().stripeCustomerId;
 
@@ -503,6 +532,8 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+
+    res.status(200).end();
 });
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -842,6 +873,7 @@ async function subscriptionCancelled(data) {
                 'time': time,
                 'note': note,
             }, { merge: true });
+
         functions.logger.log("Successfully added subscription to payPalSubscriptions");
 
         await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
@@ -910,11 +942,29 @@ async function subscriptionActivated(data) {
             }, { merge: true });
         functions.logger.log("Successfully added subscription to payPalSubscriptions");
 
+        await admin.firestore().collection('invoices').doc(customerEmail).collection('allInvoices').add({
+            'status': 'PAID',
+            'amount': amount,
+            'start': '',
+            'end': '',
+            'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+            'mode': 'PayPal'
+        });
+
+
+        await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
+            "type": 'paymentCharged',
+            'timestamp': admin.firestore.FieldValue.serverTimestamp(),
+            "data": {
+                'notification': `EUR ${amount} has been charged successfully!`
+            }
+        });
+
         await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
             "type": 'subscriptionActivated',
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
-                'notification': `EUR ${amount} has been charged successfully!`
+                'notification': `${planName} has been subscribed successfully!`
             }
         });
 
@@ -922,7 +972,16 @@ async function subscriptionActivated(data) {
 
         customerEmail = customerEmail.replace('@', '');
 
+
         const payload = {
+            notification: {
+                title: `Subscription notification`,
+                body: `${planName} has been subscribed successfully!`,
+            },
+            topic: customerEmail,
+        }
+
+        const payload2 = {
             notification: {
                 title: `Subscription notification`,
                 body: `EUR ${amount} has been charged successfully!`,
@@ -930,6 +989,8 @@ async function subscriptionActivated(data) {
             topic: customerEmail,
         }
         try {
+            const response2 = await admin.messaging().send(payload2);
+            functions.logger.log("Successfully sent payment notification", response2);
             const response = await admin.messaging().send(payload);
             functions.logger.log("Successfully sent payment notification", response);
         } catch (error) {
