@@ -1,17 +1,25 @@
 const admin = require('firebase-admin');
-const { onRequest } = require("firebase-functions/v2/https");
 const functions = require('firebase-functions');
-// The Firebase Admin SDK to access Firestore.
-const { initializeApp } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
+const express = require('express');
+const cors = require('cors');
 const axios = require('axios');
 
-const express = require('express');
 const app = express();
-const port = 3000;
-
+app.use(cors({ origin: true }));
 app.use(express.json());
-initializeApp();
+
+// Define your API routes here
+app.get('/:id', (req, res) => res.send(Widgets.getById(req.params.id)));
+app.post('/', (req, res) => res.send(Widgets.create()));
+app.put('/:id', (req, res) => res.send(Widgets.update(req.params.id, req.body)));
+app.delete('/:id', (req, res) => res.send(Widgets.delete(req.params.id)));
+app.get('/', (req, res) => res.send(Widgets.list()));
+
+// Expose Express API as a single Cloud Function:
+exports.widgets = functions.https.onRequest(app);
+
+admin.initializeApp();
+
 
 exports.newMessageNotification = functions.firestore
     .document("/messages/{documentId}").onCreate(async (event, context) => {
@@ -23,7 +31,8 @@ exports.newMessageNotification = functions.firestore
                 'text': data.messageText,
                 'offerId': data.offerId,
                 'userId': data.userId,
-            }
+            },
+            'read': false
         });
         var clinicId = data.clinicId;
         clinicId = clinicId.replace('@', '');
@@ -55,7 +64,8 @@ exports.offerUpdateNotification = functions.firestore
                 'status': data.status,
                 'offerId': context.params.documentId,
                 'notification': 'You offer has been updated!'
-            }
+            },
+            'read': false
         });
         var clinicId = data.clinicID;
         clinicId = clinicId.replace('@', '');
@@ -87,7 +97,8 @@ exports.offerCreateNotification = functions.firestore
                 'status': data.status,
                 'offerId': context.params.documentId,
                 'notification': 'You offer has been created!'
-            }
+            },
+            'read': false
         });
         var clinicId = data.clinicID;
         clinicId = clinicId.replace('@', '');
@@ -114,7 +125,8 @@ exports.partnersUpdateNotification = functions.firestore
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
                 'notification': 'Partners profile has been updated!'
-            }
+            },
+            'read': false
         });
         var clinicId = context.params.documentId;
         clinicId = clinicId.replace('@', '');
@@ -151,7 +163,18 @@ const stripe = require('stripe')('sk_test_51NAUUYIwXLBQ5coy2wenOb1SzXnyHxpwBQNbx
 
 exports.createCustomer = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         const { name, email, address } = req.body;
+        functions.logger.log(`Request body:`, req.body);
 
         const customer = await stripe.customers.create({
             name: name,
@@ -162,6 +185,7 @@ exports.createCustomer = functions.https.onRequest(async (req, res) => {
             // livemode:true
         });
         // add customer data to firebase
+        functions.logger.log(` create customer ${name} ${email} ${customer.id}`);
         try {
 
             await admin.firestore().collection('stripeCustomer').doc(customer.id)
@@ -174,12 +198,23 @@ exports.createCustomer = functions.https.onRequest(async (req, res) => {
         }
         res.json({ customer });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        functions.logger.log(`Error in create customer ${error.message}`);
+        res.status(500).json({ 'Error in create customer': error.message });
     }
 });
 
 exports.createStripeToken = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         const { cardNumber, expMonth, expYear, cvc, stripeCustomerId } = req.body;
 
         const token = await stripe.tokens.create({
@@ -209,6 +244,16 @@ exports.createStripeToken = functions.https.onRequest(async (req, res) => {
 
 exports.createCard = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         const customerId = req.body.customerId;
         const stripeToken = req.body.stripeToken;
 
@@ -227,13 +272,23 @@ exports.createCard = functions.https.onRequest(async (req, res) => {
         res.json({ source });
     } catch (error) {
         functions.logger.log("Error adding card", error);
-        res.status(500).json({ "Error": error.toString()});
+        res.status(500).json({ "Error": error.toString() });
     }
 });
 
 
 exports.createPlan = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         const { id, planName } = req.body;
         const product = await stripe.products.create({
             id: id,
@@ -258,6 +313,16 @@ exports.createPlan = functions.https.onRequest(async (req, res) => {
 
 exports.createPrice = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         const { unit_amount, currency, interval, planId } = req.body;
 
         const price = await stripe.prices.create({
@@ -285,6 +350,15 @@ exports.createPrice = functions.https.onRequest(async (req, res) => {
 
 exports.createSubscription = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         const { customer, planId } = req.body;
 
 
@@ -312,9 +386,16 @@ exports.createSubscription = functions.https.onRequest(async (req, res) => {
             const stripeCustomerSnapshot = await admin.firestore().collection('stripeCustomer').doc(customer).get();
             const stripeCustomer = stripeCustomerSnapshot.data();
             var customerEmail = stripeCustomer.customer.email;
-
+            var allowedOffersCount = 0;
+            if (planId == 'basic') {
+                allowedOffersCount = 2;
+            } else if (planId == 'silver') {
+                allowedOffersCount = 5;
+            } else {
+                allowedOffersCount = 10;
+            }
             await admin.firestore().collection('partners').doc(customerEmail)
-                .set({ 'subscription': planName, 'paymentStatus': 'UNPAID', 'isPayPalCustomer': false, }, { merge: true });
+                .set({ 'subscription': planName, 'paymentStatus': 'UNPAID', 'isPayPalCustomer': false, 'allowedOffersCount': allowedOffersCount }, { merge: true });
             functions.logger.log("Successfully added subscription to partners");
 
             await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
@@ -322,7 +403,8 @@ exports.createSubscription = functions.https.onRequest(async (req, res) => {
                 'timestamp': admin.firestore.FieldValue.serverTimestamp(),
                 "data": {
                     'notification': `${planName} has been subscribed successfully!`
-                }
+                },
+                'read': false
             });
 
             functions.logger.log("notification added");
@@ -355,6 +437,16 @@ exports.createSubscription = functions.https.onRequest(async (req, res) => {
 
 exports.cancelStripeUserSubscription = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         const { stripeCustomerId } = req.body;
 
         const subscriptionSnapshot = await admin.firestore().collection('stripeCustomer').doc(stripeCustomerId).get();
@@ -379,6 +471,7 @@ exports.cancelStripeUserSubscription = functions.https.onRequest(async (req, res
 
 async function cancelStripeSubscription(subscriptionId, stripeCustomerId, customerEmail) {
     try {
+
         const deleted = await stripe.subscriptions.cancel(subscriptionId);
 
         await admin.firestore().collection('stripeCustomer').doc(stripeCustomerId)
@@ -390,7 +483,8 @@ async function cancelStripeSubscription(subscriptionId, stripeCustomerId, custom
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
                 'notification': `Your subscription has been cancelled!`
-            }
+            },
+            'read': false
         });
 
         functions.logger.log("notification added");
@@ -430,6 +524,16 @@ async function retriveSubsCription(id) {
 
 exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         try {
             var data = req.body;
             var customerEmail = data.data.object.customer_email;
@@ -448,7 +552,8 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
                     "data": {
                         'notification': notification,
                         'invoiceUrl': hostedInvoiceUrl
-                    }
+                    },
+                    'read': false
                 });
 
                 var subscriptionData = await retriveSubsCription(data.data.object.subscription)
@@ -471,7 +576,8 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
                     'timestamp': admin.firestore.FieldValue.serverTimestamp(),
                     "data": {
                         'notification': notification
-                    }
+                    },
+                    'read': false
                 });
 
                 await admin.firestore().collection('invoices').doc(customerEmail).collection('allInvoices').add({
@@ -545,8 +651,52 @@ exports.stripeWebhook = functions.https.onRequest(async (req, res) => {
 
 
 // Cloud Function to create a PayPal subscription
+exports.createPayPalSubscriptionFromWeb = functions.https.onRequest(async (req, res) => {
+    try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
+        var paypalPlanId = '';
+        if (req.body.planId == 'basic') {
+            paypalPlanId = 'P-9UJ10753XJ220052RMR3P7WI';
+        } else if (req.body.planId == 'silver') {
+            paypalPlanId = 'P-11P16354YF360924MMR3P7MA';
+        } else {
+            paypalPlanId = 'P-8HM69091A9729273HMR3P7AY';
+        }
+
+        const returnUrl = 'https://www.google.com/search?q=successs';
+        const cancelUrl = 'https://www.google.com/search?q=cancel';
+        const accessToken = await getAccessToken();
+        const subscription = await createSubscription(accessToken, paypalPlanId, returnUrl, cancelUrl, req.body.customerEmail);
+
+        res.json({ success: true, subscriptionUrl: subscription.links[0].href, subscription: subscription });
+    } catch (error) {
+        functions.logger.log('Error creating PayPal subscription:', error);
+        throw new functions.https.HttpsError('internal', 'Failed to create PayPal subscription.');
+    }
+});
+
+// Cloud Function to create a PayPal subscription
 exports.createPayPalSubscription = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         var paypalPlanId = '';
         if (req.body.planId == 'basic') {
             paypalPlanId = 'P-9UJ10753XJ220052RMR3P7WI';
@@ -575,7 +725,6 @@ async function getAccessToken() {
         const clientSecret = 'EDcQ2di1vKJWsA0ySWabpz9iOfCvNWLJfZsw544vwYqKD35UsV00lH6SLCtDVRMDxUZEYLvQbZWbEBSE';
         const authString = `${clientId}:${clientSecret}`;
         const base64Auth = Buffer.from(authString).toString('base64');
-
         const response = await axios.post('https://api.sandbox.paypal.com/v1/oauth2/token', 'grant_type=client_credentials', {
             headers: {
                 'Authorization': `Basic ${base64Auth}`,
@@ -618,9 +767,21 @@ async function createSubscription(accessToken, planId, returnUrl, cancelUrl, cus
 
         var planName = getPlanName(planId);
         var subscriptionId = response.data.id;
+
+        var fPlanId = getPlanId(planId);
+        var allowedOffersCount = 0;
+
+        if (fPlanId == 'basic') {
+            allowedOffersCount = 2;
+        } else if (fPlanId == 'silver') {
+            allowedOffersCount = 5;
+        } else {
+            allowedOffersCount = 10;
+        }
+
         //add data to partners table
         await admin.firestore().collection('partners').doc(customerEmail)
-            .set({ 'subscription': planName, 'paymentStatus': 'UNPAID', 'isPayPalCustomer': true, 'payPalSubscriptionId': subscriptionId }, { merge: true });
+            .set({ 'subscription': planName, 'paymentStatus': 'UNPAID', 'isPayPalCustomer': true, 'payPalSubscriptionId': subscriptionId, 'allowedOffersCount': allowedOffersCount }, { merge: true });
         functions.logger.log("Successfully added subscription to partners");
 
         await admin.firestore().collection('payPalSubscriptions').doc(subscriptionId)
@@ -664,6 +825,16 @@ function getPlanId(payPalPlanId) {
 // Cloud Function to create a PayPal subscription
 exports.cancelPayPalSubscription = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         const subscriptionId = req.body.subscriptionId;
         const reason = req.body.reason;
 
@@ -707,6 +878,16 @@ async function cancelPayPalUserSubscription(subscriptionId, reason) {
 
 exports.payPalWebhookHandler = functions.https.onRequest(async (req, res) => {
     try {
+        res.set('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'OPTIONS') {
+            // Send response to OPTIONS requests
+            res.set('Access-Control-Allow-Methods', '*');
+            res.set('Access-Control-Allow-Headers', '*');
+            res.set('Access-Control-Max-Age', '3600');
+            res.status(204).send('');
+            return;
+        }
         // await admin.firestore().collection('paypalWebhooks').add({
         //     'data': req.body
         // });
@@ -749,7 +930,8 @@ async function subscriptionPaymentFailed(data) {
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
                 'notification': `${planName} payment failed!`,
-            }
+            },
+            'read': false
         });
 
         functions.logger.log("Successfully added notification");
@@ -818,7 +1000,8 @@ async function subscriptionSuspended(data) {
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
                 'notification': `${planName} subscription has been suspended!`,
-            }
+            },
+            'read': false
         });
 
         functions.logger.log("Successfully added notification");
@@ -881,7 +1064,8 @@ async function subscriptionCancelled(data) {
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
                 'notification': `${planName} subscription has been cancelled!`,
-            }
+            },
+            'read': false
         });
 
         functions.logger.log("Successfully added notification");
@@ -957,7 +1141,8 @@ async function subscriptionActivated(data) {
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
                 'notification': `EUR ${amount} has been charged successfully!`
-            }
+            },
+            'read': false
         });
 
         await admin.firestore().collection('notifications').doc(customerEmail).collection('allNotifications').add({
@@ -965,7 +1150,8 @@ async function subscriptionActivated(data) {
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
                 'notification': `${planName} has been subscribed successfully!`
-            }
+            },
+            'read': false
         });
 
         functions.logger.log("Successfully added notification");
@@ -1016,7 +1202,8 @@ async function subscriptionCreated(data) {
             'timestamp': admin.firestore.FieldValue.serverTimestamp(),
             "data": {
                 'notification': `${planName} has been subscribed successfully!`
-            }
+            },
+            'read': false
         });
         functions.logger.log("Successfully added notification");
 
